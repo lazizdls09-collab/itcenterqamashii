@@ -564,7 +564,8 @@ html { scrollbar-color: var(--blue) var(--ink); scrollbar-width: thin; }
     transition: transform .9s cubic-bezier(.2, .8, .2, 1), box-shadow .4s ease, border-color .4s ease;
   }
   .team-stage > .team-card:hover {
-    transform: translate3d(var(--x, 0px), -14px, 90px) rotateY(0deg);
+    /* Faqat yuqoriga ko'tarish: kartani Z o'qida siljitish hover hududini o'zgartirib, titrashga olib kelardi */
+    transform: translate3d(var(--x, 0px), -14px, var(--z, 0px)) rotateY(var(--r, 0deg));
     box-shadow: 0 40px 80px -30px rgba(47, 107, 255, .7), 0 0 0 1px rgba(56, 182, 255, .35);
   }
 }
