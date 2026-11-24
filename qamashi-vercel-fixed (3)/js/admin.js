@@ -30,46 +30,39 @@
   const fmtDate = (iso) => { try { return new Date(iso).toLocaleString("uz-UZ", { dateStyle: "short", timeStyle: "short" }); } catch (e) { return ""; } };
   function setStatus(id, kind, msg) { const n = document.getElementById(id); n.className = `status ${kind || ""}`; n.textContent = msg; }
 
-  // ---------- Auth gate (demo) ----------
-  // NOTE: client-side only. Anyone who can read this file can read the login.
-  // Real protection needs server-side auth before the site holds real data.
-  const ADMIN_LOGIN = "qamashi";
-  const ADMIN_PASSWORD = "itcenter";
-  const SESSION_KEY = "qamashi.admin.session";
+  // ---------- Auth (Supabase email + parol) ----------
   const loginView = $("#login-view");
   const appView = $("#app-view");
   const loginForm = $("#login-form");
   const loginError = $("#l-error");
 
-  function isAuthed() {
-    try { return sessionStorage.getItem(SESSION_KEY) === "1"; } catch (e) { return false; }
-  }
-
-  loginForm.addEventListener("submit", (e) => {
+  loginForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const user = $("#l-user").value.trim();
+    const email = $("#l-user").value.trim();
     const pass = $("#l-pass").value;
     $("#l-pass").value = "";
-    if (user === ADMIN_LOGIN && pass === ADMIN_PASSWORD) {
-      try { sessionStorage.setItem(SESSION_KEY, "1"); } catch (err) { /* private mode: still works for this tab */ }
-      loginError.textContent = "";
-      showApp();
-    } else {
-      loginError.textContent = "Login yoki parol noto‘g‘ri.";
+    loginError.textContent = "";
+    try {
+      await window.Cloud.signIn(email, pass);
+    } catch (err) {
+      loginError.textContent = "E-pochta yoki parol noto‘g‘ri.";
+      return;
     }
+    await showApp();
   });
 
-  $("#logout").addEventListener("click", () => {
-    try { sessionStorage.removeItem(SESSION_KEY); } catch (err) { /* ignore */ }
+  $("#logout").addEventListener("click", async () => {
+    await window.Cloud.signOut();
     appView.hidden = true;
     loginView.hidden = false;
     $("#l-pass").value = "";
     loginError.textContent = "";
   });
 
-  function showApp() {
+  async function showApp() {
     loginView.hidden = true;
     appView.hidden = false;
+    await Promise.all([window.ContentStore.refresh(), window.Messages.refresh()]).catch(() => {});
     show("dashboard");
   }
 
@@ -84,14 +77,14 @@
 
   // ---------- Content helpers ----------
   function loadContent() { return window.ContentStore.load(); }
-  function saveContent(mutator) {
+  async function saveContent(mutator) {
     try {
       const data = loadContent();
       mutator(data);
-      window.ContentStore.save(data);
+      await window.ContentStore.save(data);
       return true;
     } catch (e) {
-      alert("Saqlashda xatolik: brauzer xotirasi to‘lib qolgan bo‘lishi mumkin. Kattaroq fayllar o‘rniga havola ishlating.");
+      alert("Saqlanmadi: internet aloqasini tekshirib, qayta urinib ko‘ring.");
       return false;
     }
   }
@@ -240,8 +233,8 @@
     if (file && file.size > MAX_IMG) return setStatus("tm-status", "error", "Rasm 8 MB dan katta.");
     setStatus("tm-status", "", "Saqlanmoqda…");
     try {
-      const photo = file ? await window.resizeImage(file) : null;
-      if (saveContent((d) => { d.team.push({ id: uid("team"), name, role, bio, photo }); })) {
+      const photo = file ? await window.uploadImage(file, "team") : null;
+      if (await saveContent((d) => { d.team.push({ id: uid("team"), name, role, bio, photo }); })) {
         setStatus("tm-status", "success", "A’zo qo‘shildi.");
         e.target.reset();
         renderTeam();
@@ -276,9 +269,9 @@
     if (file.size > MAX_IMG) return setStatus("w-status", "error", "Rasm 8 MB dan katta.");
     setStatus("w-status", "", "Saqlanmoqda…");
     try {
-      const photo = await window.resizeImage(file, 1000);
+      const photo = await window.uploadImage(file, "winners", 1000);
       const item = { id: uid("winner-page"), title, desc, photo };
-      if (!saveContent((d) => { d.winnerPages.push(item); })) {
+      if (!(await saveContent((d) => { d.winnerPages.push(item); }))) {
         setStatus("w-status", "error", "Saqlab bo‘lmadi: xotira to‘lgan bo‘lishi mumkin.");
         return;
       }
@@ -323,10 +316,10 @@
     if (file.size > MAX_IMG) return setStatus("d-status", "error", "Rasm 8 MB dan katta.");
     setStatus("d-status", "", "Saqlanmoqda…");
     try {
-      const photo = await window.resizeImage(file);
+      const photo = await window.uploadImage(file, "districts");
       const id = $("#d-select").value;
       const caption = $("#d-caption").value.trim();
-      if (saveContent((d) => { d.districtPhotos[id] = [...(d.districtPhotos[id] || []), { photo, caption }]; })) {
+      if (await saveContent((d) => { d.districtPhotos[id] = [...(d.districtPhotos[id] || []), { photo, caption }]; })) {
         setStatus("d-status", "success", "Rasm qo‘shildi.");
         e.target.reset();
         renderDistrictPhotos();
@@ -352,20 +345,25 @@
       $(`#st-${k}-desc`).value = s.courses[k].desc;
     });
   };
-  $("#site-form").addEventListener("submit", (e) => {
+  $("#site-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const courses = {};
     SITE_COURSE_KEYS.forEach((k) => {
       courses[k] = { title: $(`#st-${k}-title`).value.trim(), desc: $(`#st-${k}-desc`).value.trim() };
     });
     const site = { line1: $("#st-line1").value.trim(), line2: $("#st-line2").value.trim(), lead: $("#st-lead").value.trim(), courses };
-    if (saveContent((d) => { d.site = site; })) setStatus("st-status", "success", "Saqlandi. Bosh sahifada darhol ko‘rinadi.");
+    if (await saveContent((d) => { d.site = site; })) setStatus("st-status", "success", "Saqlandi. Bosh sahifada darhol ko‘rinadi.");
   });
 
-  // Keep dashboard and lists fresh when another tab changes storage
-  window.addEventListener("storage", () => {
+  // Keep the open panel fresh when shared data changes
+  window.addEventListener("messageschange", () => {
     const active = $$("[data-view]").find((s) => !s.hidden);
     if (active && renderers[active.dataset.view]) renderers[active.dataset.view]();
+  });
+  // Background saves that fail should say so instead of failing silently
+  window.addEventListener("unhandledrejection", (e) => {
+    alert("Saqlanmadi: internet aloqasini tekshirib, qayta urinib ko‘ring.");
+    e.preventDefault();
   });
 
   // Password visibility toggle ("ko‘zcha")
@@ -381,11 +379,11 @@
     });
   }
 
-  // Live sync with Firebase: new applications appear instantly
+  // Live sync: new applications appear without reloading
   window.RegistrationService.subscribe && window.RegistrationService.subscribe(() => {
     const active = $$("[data-view]").find((s) => !s.hidden);
     if (active && renderers[active.dataset.view]) renderers[active.dataset.view]();
   });
 
-  if (isAuthed()) showApp();
+  window.Cloud.session().then((session) => { if (session) showApp(); }).catch(() => {});
 })();

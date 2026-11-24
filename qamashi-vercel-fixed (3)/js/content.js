@@ -1,17 +1,13 @@
 /* ==========================================================
-   Content layer (demo, browser-only).
-     - ContentStore: team, winners, district photos, settings
-     -> localStorage (small JSON)
-     - Messages: admin-managed messages -> localStorage
-   - RegistrationService lives in registration.js
-   INTEGRATION POINT: when Supabase is connected, replace the
-   bodies of these objects with Supabase table/storage calls. The
-   public site and admin only talk to these APIs.
+   Content layer (Supabase).
+     - ContentStore: team, winners, district photos, site text
+       -> site_data table, key "content" (shared by all visitors)
+     - Messages: contact messages -> contact_messages table
+     - Images are uploaded to the "media" bucket (see uploadImage)
+   The public site and admin use the same synchronous API: the latest
+   known data is kept in memory and refreshed from Supabase.
    ========================================================== */
 (() => {
-  const CONTENT_KEY = "qamashi.content.v1";
-  const MESSAGES_KEY = "qamashi.messages.v1";
-
   const DEFAULTS = {
     team: [
       { id: "team-1", sample: true, roleKey: "team.director", photo: null },
@@ -29,7 +25,7 @@
       { id: "winner-page-2", photo: "assets/images/winners/winner-2.jpg", caption: "G‘olib o‘quvchilarimiz" },
       { id: "winner-page-3", photo: "assets/images/winners/winner-3.jpg", caption: "G‘olib o‘quvchilarimiz" }
     ],
-    // district id -> [{ photo: dataURL | url, caption }]
+    // district id -> [{ photo: URL, caption }]
     districtPhotos: {
       shahrisabz: [
         { photo: "assets/images/landmarks/landmark-mausoleum.jpg", caption: "Tarixiy obida (namuna rasm)" },
@@ -52,38 +48,57 @@
     return { line1: String(r.line1 || ""), line2: String(r.line2 || ""), lead: String(r.lead || ""), courses };
   }
 
+  function normalize(raw) {
+    const stored = raw && typeof raw === "object" ? raw : {};
+    const data = { ...clone(DEFAULTS), ...stored };
+    delete data.videos;
+    delete data.uploadedVideosAdded;
+    delete data.settings;
+    data.winners = (data.winners || []).map(({ videoKey, videoUrl, media, ...winner }) => winner);
+    if (!Array.isArray(data.winnerPages)) data.winnerPages = clone(DEFAULTS.winnerPages);
+    data.site = normalizeSite(stored.site);
+    return data;
+  }
+
+  const emit = () => window.dispatchEvent(new CustomEvent("contentchange"));
+  let cache = normalize(null);
+
   const ContentStore = {
-    load() {
-      let stored = {};
-      try { stored = JSON.parse(localStorage.getItem(CONTENT_KEY)) || {}; } catch (e) { stored = {}; }
-      const data = { ...clone(DEFAULTS), ...stored };
-      delete data.videos;
-      delete data.uploadedVideosAdded;
-      delete data.settings;
-      data.winners = data.winners.map(({ videoKey, videoUrl, media, ...winner }) => winner);
-      if (!Array.isArray(data.winnerPages)) data.winnerPages = clone(DEFAULTS.winnerPages);
-      data.site = normalizeSite(stored.site);
-      return data;
+    /** Returns a copy of the latest known content (synchronous). */
+    load() { return clone(cache); },
+
+    /** Fetches the shared content from Supabase and notifies the page. */
+    async refresh() {
+      const value = await window.Cloud.getSiteData("content");
+      cache = normalize(value);
+      emit();
+      return cache;
     },
-    /** Throws if storage is full or blocked — callers show an error. */
-    save(data) {
-      const saved = { ...data };
-      delete saved.videos;
-      delete saved.uploadedVideosAdded;
-      delete saved.settings;
-      saved.winners = saved.winners.map(({ videoKey, videoUrl, media, ...winner }) => winner);
-      if (!Array.isArray(saved.winnerPages)) throw new TypeError("Winner album pages must be an array.");
-      saved.site = normalizeSite(saved.site);
-      localStorage.setItem(CONTENT_KEY, JSON.stringify(saved));
-      window.dispatchEvent(new CustomEvent("contentchange"));
+
+    /** Saves to Supabase. Rejects if the server refuses; the local copy is rolled back. */
+    async save(data) {
+      const next = normalize(data);
+      if (!Array.isArray(next.winnerPages)) throw new TypeError("Winner album pages must be an array.");
+      const prev = cache;
+      cache = next;
+      emit();
+      try {
+        await window.Cloud.setSiteData("content", next);
+      } catch (err) {
+        cache = prev;
+        emit();
+        throw err;
+      }
     },
-    reset() {
-      localStorage.removeItem(CONTENT_KEY);
-      window.dispatchEvent(new CustomEvent("contentchange"));
+
+    async reset() {
+      await window.Cloud.deleteSiteData("content");
+      cache = normalize(null);
+      emit();
     }
   };
 
-  /** Resizes an image File to JPEG dataURL (keeps localStorage small). */
+  /** Resizes an image File to JPEG dataURL. */
   function resizeImage(file, max = 900) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(file);
@@ -102,28 +117,37 @@
     });
   }
 
-  // ---------- Contact messages (demo: browser only) ----------
+  /** Resizes a File and uploads it to storage. Resolves to the public URL. */
+  async function uploadImage(file, folder, max = 900) {
+    const dataUrl = await resizeImage(file, max);
+    return window.Cloud.uploadImage(dataUrl, folder);
+  }
+
+  // ---------- Contact messages ----------
+  let messages = [];
   const Messages = {
-    list() {
-      try { return JSON.parse(localStorage.getItem(MESSAGES_KEY)) || []; } catch (e) { return []; }
+    list() { return messages.slice(); },
+    async refresh() {
+      messages = await window.Cloud.listRows("contact_messages");
+      window.dispatchEvent(new CustomEvent("messageschange"));
+      return messages;
     },
-    add(msg) {
-      const list = this.list();
-      const rec = { id: `msg-${Date.now().toString(36)}`, createdAt: new Date().toISOString(), status: "new", ...msg };
-      list.unshift(rec);
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(list));
-      return rec;
+    async update(id, patch) {
+      messages = messages.map((m) => (m.id === id ? { ...m, ...patch } : m));
+      const rec = messages.find((m) => m.id === id);
+      if (rec) await window.Cloud.upsertRow("contact_messages", id, rec);
     },
-    update(id, patch) {
-      const list = this.list().map((m) => (m.id === id ? { ...m, ...patch } : m));
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(list));
-    },
-    remove(id) {
-      localStorage.setItem(MESSAGES_KEY, JSON.stringify(this.list().filter((m) => m.id !== id)));
+    async remove(id) {
+      messages = messages.filter((m) => m.id !== id);
+      await window.Cloud.deleteRow("contact_messages", id);
     }
   };
 
   window.ContentStore = ContentStore;
   window.Messages = Messages;
   window.resizeImage = resizeImage;
+  window.uploadImage = uploadImage;
+
+  // Public pages: load the shared content as soon as possible
+  ContentStore.refresh().catch(() => { /* offline: keep defaults */ });
 })();
