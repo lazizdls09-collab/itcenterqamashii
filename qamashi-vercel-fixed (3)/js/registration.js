@@ -1,49 +1,19 @@
 /* ==========================================================
-   Course registration — DEMO MODE
+   Course registration (Supabase).
    - Only name and phone are required. Phone: +998-XX-XXX-XX-XX.
-   - Saves ONLY to this browser's localStorage. Nothing is sent to
-     the IT center and no server confirmation is claimed.
-   - INTEGRATION POINT: when Supabase is connected, replace the body
-     of RegistrationService.create() with an insert into the
-     `registrations` table. The form code does not need to change.
+   - Saved to the `registrations` table; the admin panel reads it from there.
    ========================================================== */
 (() => {
-  const STORAGE_KEY = "qamashi.demoRegistrations.v1";
-
-  // ---- Firebase (Firestore) ----
-  // Firebase Console -> Project settings -> Your apps -> Web app config ni shu yerga qo'ying.
-  // Bo'sh bo'lsa, arizalar faqat shu brauzerda saqlanadi.
-  const FIREBASE_CONFIG = window.FIREBASE_CONFIG || {
-    apiKey: "",
-    authDomain: "",
-    projectId: "",
-    storageBucket: "",
-    messagingSenderId: "",
-    appId: ""
-  };
-  const COLLECTION = "registrations";
-  const hasFirebase = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
-  let dbPromise = null;
-  function loadScript(src) {
-    return new Promise((res, rej) => { const sc = document.createElement("script"); sc.src = src; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); });
-  }
-  function getDb() {
-    if (!hasFirebase) return Promise.resolve(null);
-    if (!dbPromise) {
-      const v = "10.12.2";
-      dbPromise = loadScript(`https://www.gstatic.com/firebasejs/${v}/firebase-app-compat.js`)
-        .then(() => loadScript(`https://www.gstatic.com/firebasejs/${v}/firebase-firestore-compat.js`))
-        .then(() => { if (!window.firebase.apps.length) window.firebase.initializeApp(FIREBASE_CONFIG); return window.firebase.firestore(); })
-        .catch(() => null);
-    }
-    return dbPromise;
-  }
-  const readLocal = () => { try { const d = JSON.parse(localStorage.getItem(STORAGE_KEY)); return Array.isArray(d) ? d : []; } catch (e) { return []; } };
-  const writeLocal = (list) => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ } };
+  const TABLE = "registrations";
+  let items = [];
 
   const RegistrationService = {
-    cloud: hasFirebase,
-    list() { return readLocal(); },
+    list() { return items.slice(); },
+    async refresh() {
+      items = await window.Cloud.listRows(TABLE);
+      return items;
+    },
+    // Public form: the record is saved to Supabase; the promise rejects if the server refuses.
     async create(payload) {
       const record = {
         id: `r-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -52,33 +22,27 @@
         paid: false,
         ...payload
       };
-      const db = await getDb();
-      if (db) {
-        await db.collection(COLLECTION).doc(record.id).set(record);
-      }
-      const list = readLocal(); list.push(record); writeLocal(list);
-      return { mode: db ? "cloud" : "local", record };
+      await window.Cloud.upsertRow(TABLE, record.id, record);
+      items.push(record);
+      return { mode: "cloud", record };
     },
-    // Admin: live updates from Firestore; calls onChange whenever data changes.
+    // Admin: refresh now, every 15 s, and when the tab becomes visible again.
     async subscribe(onChange) {
-      const db = await getDb();
-      if (!db) return false;
-      db.collection(COLLECTION).onSnapshot((snap) => {
-        writeLocal(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-        onChange && onChange();
-      }, () => {});
+      const tick = () => this.refresh().then(() => onChange && onChange()).catch(() => {});
+      tick();
+      setInterval(tick, 15000);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
       return true;
     },
-    clear() { try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* ignore */ } },
-    save(list) { writeLocal(list); },
-    update(id, patch) {
-      this.save(this.list().map((r) => (r.id === id ? { ...r, ...patch } : r)));
-      getDb().then((db) => db && db.collection(COLLECTION).doc(id).set(patch, { merge: true }));
+    async update(id, patch) {
+      items = items.map((r) => (r.id === id ? { ...r, ...patch } : r));
+      const rec = items.find((r) => r.id === id);
+      if (rec) await window.Cloud.upsertRow(TABLE, id, rec);
     },
-    setStatus(id, status) { this.update(id, { status }); },
-    remove(id) {
-      this.save(this.list().filter((r) => r.id !== id));
-      getDb().then((db) => db && db.collection(COLLECTION).doc(id).delete());
+    setStatus(id, status) { return this.update(id, { status }); },
+    async remove(id) {
+      items = items.filter((r) => r.id !== id);
+      await window.Cloud.deleteRow(TABLE, id);
     }
   };
   window.RegistrationService = RegistrationService;

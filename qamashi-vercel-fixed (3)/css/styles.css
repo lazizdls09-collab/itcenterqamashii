@@ -26,6 +26,9 @@
 *::after { box-sizing: border-box; }
 
 html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+/* Decorative layers (clouds, glows) must not make the page wider than the phone screen:
+   wider content makes mobile browsers zoom the whole page out. */
+html { overflow-x: hidden; overflow-x: clip; }
 
 body {
   margin: 0;
